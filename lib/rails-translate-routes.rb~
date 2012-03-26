@@ -5,7 +5,6 @@
 class RailsTranslateRoutes
   TRANSLATABLE_SEGMENT = /^([\w-]+)(\()?/.freeze
   LOCALE_PARAM_KEY = :locale.freeze
-  URL_SEGMENTS_NAMESPACE = "url_segments"
   ROUTE_HELPER_CONTAINER = [
     ActionController::Base,
     ActionView::Base,
@@ -117,9 +116,9 @@ class RailsTranslateRoutes
     # Add translations from another file to the dictionary.
     def add_dictionary_from_file file_path
       yaml = YAML.load_file(file_path)
-      locale = yaml.keys.first
-      translations = yaml[locale][URL_SEGMENTS_NAMESPACE]
-      merge_translations locale, translations
+      yaml.each_pair do |locale, translations|
+        merge_translations locale, translations
+      end
       set_available_locales_from_dictionary
     end
 
@@ -140,7 +139,7 @@ class RailsTranslateRoutes
       reset_dictionary
       wanted_locales.each do |locale|
         @dictionary[locale] = Hash.new do |hsh, key|
-          hsh[key] = I18n.translate(URL_SEGMENTS_NAMESPACE + "." + key, :locale => locale) #DISCUSS: caching or no caching (store key and translation in dictionary?)
+          hsh[key] = I18n.translate key, :locale => locale #DISCUSS: caching or no caching (store key and translation in dictionary?)
         end
       end
       @available_locales = @dictionary.keys.map &:to_s
@@ -166,14 +165,35 @@ class RailsTranslateRoutes
 
       # save original routes and clear route set
       original_routes = route_set.routes.dup                     # Array [routeA, routeB, ...]
-      original_routes.delete_if{|r| r.path == '/assets'}
+
+      if Rails.version >= '3.2'
+        original_routes.routes.delete_if{|r| r.path.spec.to_s == '/assets'  }
+      else
+        original_routes.delete_if{|r| r.path == '/assets'}
+      end
+
       original_named_routes = route_set.named_routes.routes.dup  # Hash {:name => :route}
 
-      reset_route_set route_set
+      if Rails.version >= '3.2'
+        translated_routes = []
+        original_routes.each do |original_route|
+          translations_for(original_route).each do |translated_route_args|
+            translated_routes << translated_route_args
+          end
+        end
 
-      original_routes.each do |original_route|
-        translations_for(original_route).each do |translated_route_args|
+        reset_route_set route_set
+
+        translated_routes.each do |translated_route_args|
           route_set.add_route *translated_route_args
+        end
+      else
+        reset_route_set route_set
+
+        original_routes.each do |original_route|
+          translations_for(original_route).each do |translated_route_args|
+            route_set.add_route *translated_route_args
+          end
         end
       end
 
@@ -190,10 +210,16 @@ class RailsTranslateRoutes
     # Add unmodified root route to route_set
     def add_root_route root_route, route_set
       if @prefix_on_default_locale
-        root_route.conditions[:path_info] = root_route.conditions[:path_info].dup
-        route_set.set.add_route *root_route
-        route_set.named_routes[root_route.name] = root_route
-        route_set.routes << root_route
+        if Rails.version >= '3.2'
+          conditions = { :path_info => root_route.path.spec.to_s }
+          conditions[:request_method] = parse_request_methods root_route.verb if root_route.verb != //
+          route_set.add_route root_route.app, conditions, root_route.requirements, root_route.defaults, root_route.name
+        else
+          root_route.conditions[:path_info] = root_route.conditions[:path_info].dup
+          route_set.set.add_route *root_route
+          route_set.named_routes[root_route.name] = root_route
+          route_set.routes << root_route
+        end
       end
     end
 
@@ -225,10 +251,18 @@ class RailsTranslateRoutes
 
     # Generate translation for a single route for one locale
     def translate_route route, locale
-      conditions = { :path_info => translate_path(route.path, locale) }
-      conditions[:request_method] = parse_request_methods route.conditions[:request_method] if route.conditions.has_key? :request_method
+      if Rails.version >= '3.2'
+        conditions = { :path_info => translate_path(route.path.spec.to_s, locale) }
+        conditions[:request_method] = parse_request_methods route.verb if route.verb != //
+        conditions[:subdomain] = route.constraints[:subdomain] if route.constraints
+        defaults = route.defaults.merge LOCALE_PARAM_KEY => locale.dup
+      else
+        conditions = { :path_info => translate_path(route.path, locale) }
+        conditions[:request_method] = parse_request_methods route.conditions[:request_method] if route.conditions.has_key? :request_method
+        defaults = route.defaults.merge LOCALE_PARAM_KEY => locale
+      end
+
       requirements = route.requirements.merge LOCALE_PARAM_KEY => locale
-      defaults = route.defaults.merge LOCALE_PARAM_KEY => locale
       new_name = "#{route.name}_#{locale_suffix(locale)}" if route.name
 
       [route.app, conditions, requirements, defaults, new_name]
@@ -341,4 +375,3 @@ RailsTranslateRoutes::ROUTE_HELPER_CONTAINER.each do |klass|
     end
   end
 end
-
